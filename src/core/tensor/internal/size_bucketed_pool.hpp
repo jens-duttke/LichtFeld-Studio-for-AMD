@@ -4,6 +4,7 @@
 #pragma once
 
 #include "core/alloc_counter.hpp"
+#include "core/cuda_allocation.hpp"
 #include "core/cuda_error.hpp"
 #include "core/export.hpp"
 #include "core/logger.hpp"
@@ -174,7 +175,7 @@ namespace lfs::core {
                 const bool large_probationary_buffer =
                     bucket_size > budget / 2 && bucket.hits == 0 && bucket.misses < 2;
                 if (large_probationary_buffer) {
-                    const cudaError_t free_status = cudaFreeAsync(ptr, stream);
+                    const cudaError_t free_status = (cuda_async_mempools_supported() ? cudaFreeAsync(ptr, stream) : cudaFree(ptr));
                     if (free_status != cudaSuccess) {
                         ensure_cuda_success(
                             free_status, "cudaFreeAsync(size-bucket probationary block)",
@@ -196,7 +197,7 @@ namespace lfs::core {
                         "tensor.bucket.evict", old.stream,
                         reinterpret_cast<uintptr_t>(old.ptr), bucket_size,
                         reinterpret_cast<uintptr_t>(old.stream));
-                    const cudaError_t free_status = cudaFreeAsync(old.ptr, old.stream);
+                    const cudaError_t free_status = (cuda_async_mempools_supported() ? cudaFreeAsync(old.ptr, old.stream) : cudaFree(old.ptr));
                     if (free_status != cudaSuccess) {
                         ensure_cuda_success(
                             free_status, "cudaFreeAsync(size-bucket entry eviction)",
@@ -223,10 +224,14 @@ namespace lfs::core {
                 return ptr;
 
             const size_t bucket_size = get_bucket_size(bytes);
-            cudaError_t err = cudaMallocAsync(&ptr, bucket_size, stream);
+            cudaError_t err = cuda_async_mempools_supported()
+                                  ? cudaMallocAsync(&ptr, bucket_size, stream)
+                                  : cudaMalloc(&ptr, bucket_size);
             if (err != cudaSuccess) {
                 trim_cache();
-                err = cudaMallocAsync(&ptr, bucket_size, stream);
+                err = cuda_async_mempools_supported()
+                          ? cudaMallocAsync(&ptr, bucket_size, stream)
+                          : cudaMalloc(&ptr, bucket_size);
                 if (err != cudaSuccess) {
                     ensure_cuda_success(err, "cudaMallocAsync(size bucket retry)",
                                         ::lfs::core::detail::format_cuda_safe("bucket_bytes={}", bucket_size),
@@ -249,7 +254,7 @@ namespace lfs::core {
                 return;
             if (!cache_free(ptr, bytes, stream)) {
                 retire_live_allocation(bytes);
-                const cudaError_t free_status = cudaFreeAsync(ptr, stream);
+                const cudaError_t free_status = (cuda_async_mempools_supported() ? cudaFreeAsync(ptr, stream) : cudaFree(ptr));
                 if (free_status != cudaSuccess) {
                     ensure_cuda_success(
                         free_status, "cudaFreeAsync(size-bucket uncached block)",
@@ -295,7 +300,7 @@ namespace lfs::core {
                         "tensor.bucket.trim", block.stream,
                         reinterpret_cast<uintptr_t>(block.ptr), buckets_[i].bucket_size,
                         reinterpret_cast<uintptr_t>(block.stream));
-                    const cudaError_t free_status = cudaFreeAsync(block.ptr, block.stream);
+                    const cudaError_t free_status = (cuda_async_mempools_supported() ? cudaFreeAsync(block.ptr, block.stream) : cudaFree(block.ptr));
                     if (free_status != cudaSuccess) {
                         ensure_cuda_success(
                             free_status, "cudaFreeAsync(size-bucket cache trim)",
@@ -451,7 +456,7 @@ namespace lfs::core {
                     "tensor.bucket.budget_evict", victim.stream,
                     reinterpret_cast<uintptr_t>(victim.ptr), victim_size,
                     reinterpret_cast<uintptr_t>(victim.stream));
-                const cudaError_t free_status = cudaFreeAsync(victim.ptr, victim.stream);
+                const cudaError_t free_status = (cuda_async_mempools_supported() ? cudaFreeAsync(victim.ptr, victim.stream) : cudaFree(victim.ptr));
                 if (free_status != cudaSuccess) {
                     ensure_cuda_success(
                         free_status, "cudaFreeAsync(size-bucket budget eviction)",

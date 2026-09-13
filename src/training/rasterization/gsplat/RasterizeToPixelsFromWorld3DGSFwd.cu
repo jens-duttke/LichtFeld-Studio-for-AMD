@@ -148,9 +148,24 @@ namespace gsplat_lfs {
         for (uint32_t b = 0; b < num_batches; ++b) {
             // resync all threads before beginning next batch
             // end early if entire tile is done
+#ifdef LFS_NO_BARRIER_REDUCTION
+            // See kernels_forward.cuh: bar.red (__syncthreads_count) is not
+            // universally available, so the all-done test uses a shared flag.
+            __shared__ int s_all_done;
+            if (tr == 0)
+                s_all_done = 1;
+            __syncthreads();
+            if (!done)
+                s_all_done = 0;
+            __syncthreads();
+            if (s_all_done != 0) {
+                break;
+            }
+#else
             if (__syncthreads_count(done) >= block_size) {
                 break;
             }
+#endif
 
             // each thread fetch 1 gaussian from front to back
             // index of gaussian to load

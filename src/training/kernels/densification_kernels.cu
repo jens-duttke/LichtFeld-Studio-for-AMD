@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/assert.hpp"
+#include "core/cuda_allocation.hpp"
 #include "core/cuda_error.hpp"
 #include "densification_kernels.hpp"
 #include "lfs/cuda_scratch.hpp"
@@ -319,7 +320,7 @@ namespace lfs::training::kernels {
         float** d_adam = nullptr;
         if (n_adam_scales > 0 && adam_scale_ptrs != nullptr) {
             LFS_CUDA_CHECK_MSG(
-                cudaMallocAsync(reinterpret_cast<void**>(&d_adam),
+                ::lfs::core::malloc_async(reinterpret_cast<void**>(&d_adam),
                                 sizeof(float*) * static_cast<size_t>(n_adam_scales), stream),
                 "fill_free_slots adam ptr table");
             LFS_CUDA_CHECK_MSG(
@@ -339,7 +340,7 @@ namespace lfs::training::kernels {
         LFS_CUDA_LAUNCH_CHECK(stream, "training.densify.fill_free_slots_fused");
 
         if (d_adam != nullptr) {
-            LFS_CUDA_CHECK_MSG(cudaFreeAsync(d_adam, stream), "fill_free_slots free adam ptrs");
+            LFS_CUDA_CHECK_MSG(::lfs::core::free_async(d_adam, stream), "fill_free_slots free adam ptrs");
         }
     }
 
@@ -379,7 +380,7 @@ namespace lfs::training::kernels {
 
         float** d_adam = nullptr;
         LFS_CUDA_CHECK_MSG(
-            cudaMallocAsync(reinterpret_cast<void**>(&d_adam),
+            ::lfs::core::malloc_async(reinterpret_cast<void**>(&d_adam),
                             sizeof(float*) * static_cast<size_t>(n_adam_scales), stream),
             "zero_adam adam ptr table");
         LFS_CUDA_CHECK_MSG(
@@ -393,7 +394,7 @@ namespace lfs::training::kernels {
         zero_adam_scales_kernel<<<grid, block, 0, stream>>>(
             indices, n_indices, d_adam, n_adam_scales, N);
         LFS_CUDA_LAUNCH_CHECK(stream, "training.densify.zero_adam_scales");
-        LFS_CUDA_CHECK_MSG(cudaFreeAsync(d_adam, stream), "zero_adam free ptrs");
+        LFS_CUDA_CHECK_MSG(::lfs::core::free_async(d_adam, stream), "zero_adam free ptrs");
     }
 
     __global__ void packed_refine_counts_kernel(

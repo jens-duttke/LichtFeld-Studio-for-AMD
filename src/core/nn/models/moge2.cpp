@@ -38,6 +38,11 @@ namespace lfs::core::nn::models {
 
         void configure_nn_mempool() {
 #if CUDART_VERSION >= 11020
+            // Tuning only: without stream-ordered pool support there is nothing
+            // to configure, and forcing the calls would latch an error.
+            if (!lfs::core::cuda_async_mempools_supported()) {
+                return;
+            }
             int device = 0;
             LFS_CUDA_CHECK(cudaGetDevice(&device));
             cudaMemPool_t pool = nullptr;

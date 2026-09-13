@@ -2594,7 +2594,18 @@ namespace lfs::vis {
         const bool has_platform_external_memory =
             extensionAvailable(available_extensions, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME);
 #endif
-        const bool enable_external_memory = has_external_memory && has_platform_external_memory;
+        // Interop needs both halves. The extensions above only establish that
+        // Vulkan can import external memory; CUDA must also be able to export
+        // it, which requires virtual memory management and a shareable handle
+        // type. Where CUDA cannot, leave interop off so callers take their
+        // CUDA-resident path instead of failing at the first splat allocation.
+        const bool cuda_can_export = lfs::core::exportable_memory_supported(0);
+        if (has_external_memory && has_platform_external_memory && !cuda_can_export) {
+            LOG_WARN("Vulkan external-memory interop disabled: CUDA cannot export shareable "
+                     "device memory on this device; using the CUDA-resident viewer path");
+        }
+        const bool enable_external_memory =
+            has_external_memory && has_platform_external_memory && cuda_can_export;
         if (enable_external_memory) {
             appendUniqueExtension(extensions, VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME);
 #ifdef _WIN32
@@ -2614,7 +2625,10 @@ namespace lfs::vis {
         const bool has_platform_external_semaphore =
             extensionAvailable(available_extensions, VK_KHR_EXTERNAL_SEMAPHORE_FD_EXTENSION_NAME);
 #endif
-        const bool enable_external_semaphore = has_external_semaphore && has_platform_external_semaphore;
+        // Same reasoning as external memory above: a semaphore CUDA cannot
+        // import is of no use for cross-API synchronization.
+        const bool enable_external_semaphore =
+            has_external_semaphore && has_platform_external_semaphore && cuda_can_export;
         if (enable_external_semaphore) {
             appendUniqueExtension(extensions, VK_KHR_EXTERNAL_SEMAPHORE_EXTENSION_NAME);
 #ifdef _WIN32
@@ -2914,11 +2928,12 @@ namespace lfs::vis {
         vkGetPhysicalDeviceProperties(physical_device_, &device_properties);
         line_width_range_[0] = device_properties.limits.lineWidthRange[0];
         line_width_range_[1] = device_properties.limits.lineWidthRange[1];
-        if (!external_memory_interop_enabled_) {
-            return fail("Vulkan external memory interop is required (KHR_external_memory + platform variant); device is missing the extension(s)");
-        }
-        if (!external_semaphore_interop_enabled_) {
-            return fail("Vulkan external timeline-semaphore interop is required (KHR_external_semaphore + platform variant); device is missing the extension(s)");
+        if (!external_memory_interop_enabled_ || !external_semaphore_interop_enabled_) {
+            // Experimental: continue without CUDA/Vulkan interop instead of
+            // refusing to create the device. Everything that shares memory or
+            // timelines between the APIs is unavailable in this mode.
+            LOG_WARN("Vulkan CUDA-interop unavailable (memory={} semaphore={}); continuing without it",
+                     external_memory_interop_enabled_, external_semaphore_interop_enabled_);
         }
         LOG_INFO("Vulkan external memory interop enabled{}",
                  external_memory_dedicated_allocation_enabled_ ? " with dedicated allocations" : "");
@@ -3200,9 +3215,14 @@ namespace lfs::vis {
         external_format_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO;
         external_format_info.handleType = kExternalMemoryHandleType;
 
+        // Without interop the image is never handed to CUDA, so query and
+        // create it as an ordinary image: the exportability requirements below
+        // do not apply and would otherwise reject a perfectly usable format.
+        const bool exportable_image = external_memory_interop_enabled_;
+
         VkPhysicalDeviceImageFormatInfo2 format_info{};
         format_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2;
-        format_info.pNext = &external_format_info;
+        format_info.pNext = exportable_image ? static_cast<const void*>(&external_format_info) : nullptr;
         format_info.format = format;
         format_info.type = VK_IMAGE_TYPE_2D;
         format_info.tiling = VK_IMAGE_TILING_OPTIMAL;
@@ -3229,14 +3249,16 @@ namespace lfs::vis {
                 max_extent.height,
                 static_cast<int>(format)));
         }
-        if ((external_format_properties.externalMemoryProperties.externalMemoryFeatures &
-             VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT) == 0) {
-            return fail("External Vulkan image format is not exportable");
-        }
-        if ((external_format_properties.externalMemoryProperties.externalMemoryFeatures &
-             VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) != 0 &&
-            !external_memory_dedicated_allocation_enabled_) {
-            return fail("External Vulkan image format requires dedicated allocation support");
+        if (exportable_image) {
+            if ((external_format_properties.externalMemoryProperties.externalMemoryFeatures &
+                 VK_EXTERNAL_MEMORY_FEATURE_EXPORTABLE_BIT) == 0) {
+                return fail("External Vulkan image format is not exportable");
+            }
+            if ((external_format_properties.externalMemoryProperties.externalMemoryFeatures &
+                 VK_EXTERNAL_MEMORY_FEATURE_DEDICATED_ONLY_BIT) != 0 &&
+                !external_memory_dedicated_allocation_enabled_) {
+                return fail("External Vulkan image format requires dedicated allocation support");
+            }
         }
 
         out.extent = extent;
@@ -3250,7 +3272,7 @@ namespace lfs::vis {
 
         VkImageCreateInfo image_info{};
         image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
-        image_info.pNext = &external_image_info;
+        image_info.pNext = exportable_image ? static_cast<const void*>(&external_image_info) : nullptr;
         image_info.imageType = VK_IMAGE_TYPE_2D;
         image_info.extent.width = extent.width;
         image_info.extent.height = extent.height;
@@ -3323,7 +3345,7 @@ namespace lfs::vis {
 
         VkMemoryAllocateInfo allocate_info{};
         allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-        allocate_info.pNext = &export_info;
+        allocate_info.pNext = exportable_image ? static_cast<const void*>(&export_info) : nullptr;
         allocate_info.allocationSize = memory_requirements.size;
         allocate_info.memoryTypeIndex = findMemoryType(memory_requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         if (allocate_info.memoryTypeIndex == std::numeric_limits<uint32_t>::max()) {
@@ -3351,6 +3373,12 @@ namespace lfs::vis {
             return fail(std::format("vkBindImageMemory(external image) failed: {}", vkResultToString(result)));
         }
 
+        // Plain Vulkan image: fully usable for rendering and presentation, just
+        // not shareable with CUDA. Skip only the handle export — the image view
+        // below is still required.
+        if (!exportable_image) {
+            out.native_handle = kInvalidExternalNativeHandle;
+        } else {
 #ifdef _WIN32
         auto get_memory_handle = reinterpret_cast<PFN_vkGetMemoryWin32HandleKHR>(
             vkGetDeviceProcAddr(device_, "vkGetMemoryWin32HandleKHR"));
@@ -3384,6 +3412,7 @@ namespace lfs::vis {
             destroyExternalImage(out);
             return fail(std::format("Exporting external image memory handle failed: {}", vkResultToString(result)));
         }
+        } // end of exportable-only handle export
 
         VkImageViewCreateInfo view_info{};
         view_info.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -3653,6 +3682,148 @@ namespace lfs::vis {
         return true;
     }
 
+    bool VulkanContext::createMirroredBuffer(const lfs::core::ExportableBlock& block,
+                                             const VkBufferUsageFlags usage,
+                                             ExternalBuffer& out,
+                                             const std::string_view diagnostic_scope,
+                                             const std::string_view diagnostic_label) {
+        out = {};
+        const VkDeviceSize size = static_cast<VkDeviceSize>(block.reserved_bytes);
+
+        VkBufferCreateInfo buffer_info{};
+        buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        buffer_info.size = size;
+        buffer_info.usage = usage |
+                            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT |
+                            VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                            VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        // Consumers address the SH region through a buffer device address, so
+        // the mirrored buffer needs the same usage bit as the imported one.
+        if (buffer_device_address_enabled_) {
+            buffer_info.usage |= VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT;
+        }
+        std::array<uint32_t, 2> families{
+            graphics_queue_family_,
+            has_dedicated_compute_queue_ ? compute_queue_family_ : graphics_queue_family_};
+        if (has_dedicated_compute_queue_) {
+            buffer_info.sharingMode = VK_SHARING_MODE_CONCURRENT;
+            buffer_info.queueFamilyIndexCount = static_cast<uint32_t>(families.size());
+            buffer_info.pQueueFamilyIndices = families.data();
+        } else {
+            buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        }
+
+        VkResult result = vkCreateBuffer(device_, &buffer_info, nullptr, &out.buffer);
+        if (result != VK_SUCCESS) {
+            out = {};
+            return fail(std::format("vkCreateBuffer(mirrored) failed: {}", vkResultToString(result)));
+        }
+
+        VkMemoryRequirements requirements{};
+        vkGetBufferMemoryRequirements(device_, out.buffer, &requirements);
+
+        // Prefer memory that is both device-local and host-visible (resizable
+        // BAR); fall back to plain host-visible where that is unavailable.
+        uint32_t type_index = findMemoryType(requirements.memoryTypeBits,
+                                             VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
+                                                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                 VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (type_index == UINT32_MAX) {
+            type_index = findMemoryType(requirements.memoryTypeBits,
+                                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        }
+        if (type_index == UINT32_MAX) {
+            destroyExternalBuffer(out);
+            return fail("No host-visible Vulkan memory type for the mirrored buffer");
+        }
+
+        VkMemoryAllocateFlagsInfo flags_info{};
+        flags_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO;
+        flags_info.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+
+        VkMemoryAllocateInfo allocate_info{};
+        allocate_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        allocate_info.allocationSize = requirements.size;
+        allocate_info.memoryTypeIndex = type_index;
+        if (buffer_device_address_enabled_) {
+            allocate_info.pNext = &flags_info;
+        }
+
+        result = vkAllocateMemory(device_, &allocate_info, nullptr, &out.memory);
+        if (result != VK_SUCCESS) {
+            destroyExternalBuffer(out);
+            return fail(std::format("vkAllocateMemory(mirrored, {} bytes) failed: {}",
+                                    requirements.size, vkResultToString(result)));
+        }
+        result = vkBindBufferMemory(device_, out.buffer, out.memory, 0);
+        if (result != VK_SUCCESS) {
+            destroyExternalBuffer(out);
+            return fail(std::format("vkBindBufferMemory(mirrored) failed: {}", vkResultToString(result)));
+        }
+        result = vkMapMemory(device_, out.memory, 0, VK_WHOLE_SIZE, 0, &out.mapped);
+        if (result != VK_SUCCESS) {
+            out.mapped = nullptr;
+            destroyExternalBuffer(out);
+            return fail(std::format("vkMapMemory(mirrored) failed: {}", vkResultToString(result)));
+        }
+
+        {
+            VkPhysicalDeviceMemoryProperties mp{};
+            vkGetPhysicalDeviceMemoryProperties(physical_device_, &mp);
+            const VkMemoryPropertyFlags f = mp.memoryTypes[type_index].propertyFlags;
+            LOG_DEBUG("mirrored buffer: {:.1f} MiB type={} device_local={} host_visible={} label='{}'",
+                     static_cast<double>(requirements.size) / (1024.0 * 1024.0), type_index,
+                     (f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) != 0,
+                     (f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) != 0,
+                     diagnostic_label);
+        }
+        out.size = size;
+        out.allocation_size = requirements.size;
+        out.mirrored = true;
+        out.mirrored_source = block.device_ptr;
+        out.diagnostic_scope = diagnostic_scope.empty() ? "vulkan.mirrored_buffer"
+                                                        : std::string(diagnostic_scope);
+        out.diagnostic_label = makeAllocationDiagnosticLabel(diagnostic_label);
+        setDebugObjectNamef(VK_OBJECT_TYPE_BUFFER, out.buffer, "mirrored.buffer[{}]", size);
+
+        if (buffer_device_address_enabled_) {
+            VkBufferDeviceAddressInfo address_info{};
+            address_info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO;
+            address_info.buffer = out.buffer;
+            out.device_address = vkGetBufferDeviceAddress(device_, &address_info);
+        }
+        return true;
+    }
+
+    bool VulkanContext::syncMirroredBuffer(ExternalBuffer& buffer,
+                                           const std::size_t offset,
+                                           const std::size_t bytes) {
+        if (!buffer.mirrored) {
+            return true; // Shared memory: CUDA writes are already visible.
+        }
+        if (buffer.mapped == nullptr || buffer.mirrored_source == nullptr) {
+            return fail("Mirrored buffer is missing its mapping or CUDA source");
+        }
+        const std::size_t total = static_cast<std::size_t>(buffer.size);
+        if (offset > total) {
+            return fail("Mirrored buffer sync offset is past the end of the buffer");
+        }
+        const std::size_t count = bytes == 0 ? total - offset : std::min(bytes, total - offset);
+        if (count == 0) {
+            return true;
+        }
+        const cudaError_t err = cudaMemcpy(
+            static_cast<std::uint8_t*>(buffer.mapped) + offset,
+            static_cast<const std::uint8_t*>(buffer.mirrored_source) + offset,
+            count, cudaMemcpyDeviceToHost);
+        if (err != cudaSuccess) {
+            return fail(std::format("Mirrored buffer sync failed ({} bytes at offset {}): {}",
+                                    count, offset, cudaGetErrorString(err)));
+        }
+        return true;
+    }
+
     bool VulkanContext::importExportableBlock(const lfs::core::ExportableBlock& block,
                                               const VkBufferUsageFlags usage,
                                               ExternalBuffer& out,
@@ -3664,6 +3835,11 @@ namespace lfs::vis {
         }
         if (block.device_ptr == nullptr || block.reserved_bytes == 0) {
             return fail("Imported exportable block requires a reserved CUDA VA range");
+        }
+        if (block.mirrored) {
+            // Nothing to import: back the buffer with host-visible memory that
+            // stays mapped, so syncMirroredBuffer can copy CUDA -> Vulkan.
+            return createMirroredBuffer(block, usage, out, diagnostic_scope, diagnostic_label);
         }
         if (block.chunks.empty()) {
             return fail("Imported exportable block has no committed chunks");
@@ -3930,6 +4106,10 @@ namespace lfs::vis {
             recordCurrentVulkanBytes(buffer.diagnostic_scope, buffer.diagnostic_label, 0);
         }
         if (device_) {
+            if (buffer.mapped != nullptr && buffer.memory != VK_NULL_HANDLE) {
+                vkUnmapMemory(device_, buffer.memory);
+                buffer.mapped = nullptr;
+            }
             if (buffer.buffer != VK_NULL_HANDLE) {
                 vkDestroyBuffer(device_, buffer.buffer, nullptr);
             }
@@ -3958,15 +4138,23 @@ namespace lfs::vis {
             return fail("Cannot create external Vulkan semaphore before device initialization");
         }
 
-        VkPhysicalDeviceExternalSemaphoreInfo semaphore_info{};
-        semaphore_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO;
-        semaphore_info.handleType = kExternalSemaphoreHandleType;
+        // Without CUDA-side interop the semaphore still orders Vulkan's own
+        // work; it just cannot be shared. Create it as a plain timeline in that
+        // case — callers detect the absent handle and fall back to stream
+        // synchronization for the CUDA half.
+        const bool exportable = external_semaphore_interop_enabled_;
 
-        VkExternalSemaphoreProperties semaphore_properties{};
-        semaphore_properties.sType = VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES;
-        vkGetPhysicalDeviceExternalSemaphoreProperties(physical_device_, &semaphore_info, &semaphore_properties);
-        if ((semaphore_properties.externalSemaphoreFeatures & VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT) == 0) {
-            return fail("External Vulkan timeline semaphore handle is not exportable");
+        if (exportable) {
+            VkPhysicalDeviceExternalSemaphoreInfo semaphore_info{};
+            semaphore_info.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_INFO;
+            semaphore_info.handleType = kExternalSemaphoreHandleType;
+
+            VkExternalSemaphoreProperties semaphore_properties{};
+            semaphore_properties.sType = VK_STRUCTURE_TYPE_EXTERNAL_SEMAPHORE_PROPERTIES;
+            vkGetPhysicalDeviceExternalSemaphoreProperties(physical_device_, &semaphore_info, &semaphore_properties);
+            if ((semaphore_properties.externalSemaphoreFeatures & VK_EXTERNAL_SEMAPHORE_FEATURE_EXPORTABLE_BIT) == 0) {
+                return fail("External Vulkan timeline semaphore handle is not exportable");
+            }
         }
 
         out.initial_value = initial_value;
@@ -3979,7 +4167,7 @@ namespace lfs::vis {
 
         VkSemaphoreTypeCreateInfo type_info{};
         type_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
-        type_info.pNext = &export_info;
+        type_info.pNext = exportable ? static_cast<const void*>(&export_info) : nullptr;
         type_info.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
         type_info.initialValue = initial_value;
 
@@ -4002,6 +4190,14 @@ namespace lfs::vis {
                             out.semaphore,
                             "interop.timeline.external[{}]",
                             initial_value);
+
+        if (!exportable) {
+            // Plain timeline: usable for Vulkan-internal ordering, no handle to
+            // hand to CUDA. Callers detect the invalid handle and synchronize
+            // across the API boundary on the stream instead.
+            out.native_handle = kInvalidExternalNativeHandle;
+            return true;
+        }
 
 #ifdef _WIN32
         auto get_semaphore_handle = reinterpret_cast<PFN_vkGetSemaphoreWin32HandleKHR>(

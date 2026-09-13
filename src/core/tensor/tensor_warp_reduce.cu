@@ -13,6 +13,7 @@
  */
 
 #include "core/cuda_error.hpp"
+#include "core/cuda_allocation.hpp"
 #include "core/logger.hpp"
 #include "internal/gpu_config.hpp"
 #include "internal/packed128.cuh"
@@ -1030,7 +1031,7 @@ namespace lfs::core::tensor_ops {
         bool need_free = false;
 
         if (partial == nullptr) {
-            LFS_CUDA_CHECK_MSG(cudaMallocAsync(&partial, grid_size * sizeof(float), stream),
+            LFS_CUDA_CHECK_MSG(::lfs::core::malloc_async(&partial, grid_size * sizeof(float), stream),
                                "warp-reduce partial buffer (elements={})", grid_size);
             need_free = true;
         }
@@ -1072,7 +1073,7 @@ namespace lfs::core::tensor_ops {
 
         // Free partial buffer if we allocated it
         if (need_free) {
-            LFS_CUDA_CHECK_MSG(cudaFreeAsync(partial, stream),
+            LFS_CUDA_CHECK_MSG(::lfs::core::free_async(partial, stream),
                                "warp-reduce partial buffer");
         }
     }

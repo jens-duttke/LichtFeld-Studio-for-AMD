@@ -335,6 +335,14 @@ namespace lfs::core {
         if (!block || !block->state) {
             return std::unexpected("commitExportableDeviceRange: null block");
         }
+        if (block->mirrored) {
+            // The whole mirrored allocation is committed up front.
+            if (offset + bytes > block->committed_bytes) {
+                return std::unexpected(
+                    "commitExportableDeviceRange: range exceeds the mirrored allocation");
+            }
+            return {};
+        }
         if (bytes == 0) {
             return {};
         }
@@ -413,22 +421,43 @@ namespace lfs::core {
         return {};
     }
 
+    bool exportable_memory_supported(const int device) {
+        return vmm_supported(device) && export_handle_supported(device);
+    }
+
     std::expected<std::shared_ptr<ExportableBlock>, std::string>
     allocateExportableDeviceBlock(std::size_t size, int device, bool track_splat_bytes,
                                   std::size_t reserve_bytes) {
         if (size == 0) {
             return std::unexpected("allocateExportableDeviceBlock: size must be non-zero");
         }
-        if (!vmm_supported(device)) {
-            return std::unexpected(std::format(
-                "allocateExportableDeviceBlock: device {} does not support virtual memory management",
-                device));
-        }
-        if (!export_handle_supported(device)) {
-            return std::unexpected(std::format(
-                "allocateExportableDeviceBlock: device {} does not support CUDA VMM export handle type {}",
-                device,
-                kCudaHandleTypeName));
+        if (!vmm_supported(device) || !export_handle_supported(device)) {
+            // No shareable memory on this device. Hand back plain device
+            // storage flagged as mirrored: the CUDA side works exactly as
+            // before, and the Vulkan side owns its own buffer and copies.
+            LFS_CUDA_BREADCRUMB("exportable.cudaMalloc.mirrored");
+            if (const auto err = cudaSetDevice(device); err != cudaSuccess) {
+                return std::unexpected(std::format("cudaSetDevice({}) failed: {}", device,
+                                                   cudaGetErrorString(err)));
+            }
+            void* ptr = nullptr;
+            const std::size_t bytes = std::max(size, reserve_bytes);
+            if (const auto err = cudaMalloc(&ptr, bytes); err != cudaSuccess) {
+                return std::unexpected(std::format(
+                    "allocateExportableDeviceBlock (mirrored): cudaMalloc({}) failed: {}", bytes,
+                    cudaGetErrorString(err)));
+            }
+            auto block = std::make_shared<ExportableBlock>();
+            block->device_ptr = ptr;
+            block->reserved_bytes = bytes;
+            block->committed_bytes = bytes;
+            block->mirrored = true;
+            block->state = std::shared_ptr<void>(ptr, [](void* p) noexcept {
+                if (p != nullptr) {
+                    (void)cudaFree(p);
+                }
+            });
+            return block;
         }
 
         LFS_CUDA_BREADCRUMB("exportable.cudaSetDevice.allocate");
@@ -523,6 +552,15 @@ namespace lfs::core {
         if (!block || !block->state) {
             return std::unexpected("growExportableDeviceBlock: null block");
         }
+        if (block->mirrored) {
+            // Mirrored blocks are a single fixed cudaMalloc; their state is not
+            // an OwnedAllocation, so none of the VMM bookkeeping below applies.
+            if (new_size <= block->committed_bytes) {
+                return false;
+            }
+            return std::unexpected(
+                "growExportableDeviceBlock: mirrored blocks cannot grow in place");
+        }
         auto* owned = static_cast<OwnedAllocation*>(block->state.get());
 
         const std::size_t aligned_new = align_up(new_size, owned->granularity);
@@ -547,6 +585,10 @@ namespace lfs::core {
     shrinkExportableDeviceBlock(const std::shared_ptr<ExportableBlock>& block, std::size_t new_size) {
         if (!block || !block->state) {
             return std::unexpected("shrinkExportableDeviceBlock: null block");
+        }
+        if (block->mirrored) {
+            // Nothing to decommit: the allocation is one indivisible chunk.
+            return false;
         }
         auto* owned = static_cast<OwnedAllocation*>(block->state.get());
         if (owned->granularity == 0) {

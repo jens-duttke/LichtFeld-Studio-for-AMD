@@ -15,6 +15,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <format>
 #include <mutex>
 #include <optional>
@@ -881,7 +882,16 @@ namespace lfs::core {
         const cudaError_t result = cudaPointerGetAttributes(&attributes, pointer);
         finish_cuda_check(result, state, "cudaPointerGetAttributes(&attributes, pointer)",
                           std::format("validating CUDA pointer '{}' ({})", name, pointer), location);
-        if (attributes.type != cudaMemoryTypeDevice) {
+        // Same opt-out as Tensor::assert_device_storage_matches_tag: this
+        // contract is only as trustworthy as cudaPointerGetAttributes, and
+        // implementations exist that misreport device memory as managed.
+        // LFS_DISABLE_POINTER_TAG_CHECK=1 skips the classification test while
+        // keeping the null check above.
+        static const bool tag_check_disabled = [] {
+            const char* const value = std::getenv("LFS_DISABLE_POINTER_TAG_CHECK");
+            return value != nullptr && value[0] != '\0' && value[0] != '0';
+        }();
+        if (!tag_check_disabled && attributes.type != cudaMemoryTypeDevice) {
             detail::assertion_failed(
                 "LFS boundary contract", "attributes.type == cudaMemoryTypeDevice",
                 std::format("CUDA pointer '{}' has memory type {} instead of device type {}",

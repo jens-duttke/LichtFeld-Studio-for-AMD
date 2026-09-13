@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/crash_handler.hpp"
+#include "core/cuda_allocation.hpp"
 #include "core/cuda_error.hpp"
 #include "core/logger.hpp"
 #include "internal/cub_workspace.hpp"
@@ -1663,7 +1664,7 @@ namespace lfs::core::tensor_ops {
 
         // Promote to float temp, reduce with existing float path, convert result.
         float* d_f32 = nullptr;
-        LFS_CUDA_CHECK(cudaMallocAsync(&d_f32, n * sizeof(float), stream));
+        LFS_CUDA_CHECK(::lfs::core::malloc_async(&d_f32, n * sizeof(float), stream));
         {
             constexpr int BLOCK = 256;
             int grid = static_cast<int>((n + BLOCK - 1) / BLOCK);
@@ -1679,7 +1680,7 @@ namespace lfs::core::tensor_ops {
         float* d_out_f32 = nullptr;
         const bool need_tmp_out = (output_dtype == DataType::Float16);
         if (need_tmp_out) {
-            LFS_CUDA_CHECK(cudaMallocAsync(&d_out_f32, sizeof(float), stream));
+            LFS_CUDA_CHECK(::lfs::core::malloc_async(&d_out_f32, sizeof(float), stream));
         } else {
             d_out_f32 = static_cast<float*>(output);
         }
@@ -1692,9 +1693,9 @@ namespace lfs::core::tensor_ops {
             half_to_float_scalar_kernel<<<1, 1, 0, stream>>>(
                 d_out_f32, static_cast<__half*>(output));
             LFS_CUDA_LAUNCH_CHECK(stream, "tensor.ops.half_reduce_store");
-            LFS_CUDA_CHECK(cudaFreeAsync(d_out_f32, stream));
+            LFS_CUDA_CHECK(::lfs::core::free_async(d_out_f32, stream));
         }
-        LFS_CUDA_CHECK(cudaFreeAsync(d_f32, stream));
+        LFS_CUDA_CHECK(::lfs::core::free_async(d_f32, stream));
     }
 
     // Public dispatcher function

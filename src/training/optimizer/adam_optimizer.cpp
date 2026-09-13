@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "adam_optimizer.hpp"
+#include "core/cuda_allocation.hpp"
 #include "adam_api.h"
 #include "core/alloc_counter.hpp"
 #include "core/assert.hpp"
@@ -1112,7 +1113,7 @@ namespace lfs::training {
         const cudaStream_t stream = lfs::core::getCurrentCUDAStream();
         const size_t idx_bytes = indices.size() * sizeof(int64_t);
         int64_t* d_indices = nullptr;
-        LFS_CUDA_CHECK(cudaMallocAsync(&d_indices, idx_bytes, stream));
+        LFS_CUDA_CHECK(::lfs::core::malloc_async(&d_indices, idx_bytes, stream));
         LFS_CUDA_CHECK(cudaMemcpyAsync(d_indices, indices.data(), idx_bytes, cudaMemcpyHostToDevice, stream));
         lfs::core::waitForCUDAStream(stream, state.exp_avg.stream());
         lfs::core::waitForCUDAStream(stream, state.joint_bounds.stream());
@@ -1147,7 +1148,7 @@ namespace lfs::training {
             }
         }
         state.exp_avg.set_stream(stream);
-        LFS_CUDA_CHECK(cudaFreeAsync(d_indices, stream));
+        LFS_CUDA_CHECK(::lfs::core::free_async(d_indices, stream));
     }
 
     void AdamOptimizer::extend_state_by_gather(ParamType type, const lfs::core::Tensor& indices) {
@@ -1373,7 +1374,7 @@ namespace lfs::training {
                 const cudaStream_t stream = lfs::core::getCurrentCUDAStream();
                 int64_t* d_idx = nullptr;
                 const size_t idx_bytes = n_new * sizeof(int64_t);
-                LFS_CUDA_CHECK(cudaMallocAsync(&d_idx, idx_bytes, stream));
+                LFS_CUDA_CHECK(::lfs::core::malloc_async(&d_idx, idx_bytes, stream));
                 LFS_CUDA_CHECK(cudaMemcpyAsync(d_idx, new_idx.data(), idx_bytes,
                                                cudaMemcpyHostToDevice, stream));
                 lfs::core::waitForCUDAStream(stream, state.exp_avg.stream());
@@ -1410,7 +1411,7 @@ namespace lfs::training {
                 }
                 state.exp_avg.set_stream(stream);
                 state.joint_bounds.set_stream(stream);
-                LFS_CUDA_CHECK(cudaFreeAsync(d_idx, stream));
+                LFS_CUDA_CHECK(::lfs::core::free_async(d_idx, stream));
             }
             return;
         }
@@ -1684,7 +1685,7 @@ namespace lfs::training {
                         const cudaStream_t stream = lfs::core::getCurrentCUDAStream();
                         int64_t* d_idx = nullptr;
                         const size_t idx_bytes = n_new * sizeof(int64_t);
-                        LFS_CUDA_CHECK(cudaMallocAsync(&d_idx, idx_bytes, stream));
+                        LFS_CUDA_CHECK(::lfs::core::malloc_async(&d_idx, idx_bytes, stream));
                         LFS_CUDA_CHECK(cudaMemcpyAsync(d_idx, new_idx.data(), idx_bytes,
                                                        cudaMemcpyHostToDevice, stream));
                         const int slots = static_cast<int>(
@@ -1704,7 +1705,7 @@ namespace lfs::training {
                             state.exp_avg.set_stream(stream);
                             state.joint_bounds.set_stream(stream);
                         }
-                        LFS_CUDA_CHECK(cudaFreeAsync(d_idx, stream));
+                        LFS_CUDA_CHECK(::lfs::core::free_async(d_idx, stream));
                     }
                     LFS_DEBUG_ASSERT_MSG(state.capacity >= state.size,
                                          "add_new_params_gather(shN,joint): capacity < size");

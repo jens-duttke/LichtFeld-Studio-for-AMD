@@ -18,6 +18,7 @@
 #include "internal/tensor_dtype_dispatch.hpp"
 #include "internal/tensor_impl.hpp"
 #include "internal/tensor_ops.hpp"
+#include <cstdlib>
 #include <cstring>
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -1106,6 +1107,20 @@ namespace lfs::core {
     }
 
     void Tensor::assert_device_storage_matches_tag() const {
+        // This guard trusts cudaPointerGetAttributes to report the true memory
+        // kind. Not every CUDA implementation does so reliably — translation
+        // layers may report pinned host blocks as managed, which turns the
+        // check into a false positive that aborts otherwise valid work.
+        // LFS_DISABLE_POINTER_TAG_CHECK=1 opts out; the guard stays on by
+        // default so genuine tag bugs keep failing loudly.
+        static const bool tag_check_disabled = [] {
+            const char* const value = std::getenv("LFS_DISABLE_POINTER_TAG_CHECK");
+            return value != nullptr && value[0] != '\0' && value[0] != '0';
+        }();
+        if (tag_check_disabled) {
+            return;
+        }
+
         // Empty / null storage: nothing to validate.
         if (data_ == nullptr || numel() == 0) {
             return;

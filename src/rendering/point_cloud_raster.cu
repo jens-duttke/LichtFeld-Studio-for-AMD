@@ -4,6 +4,7 @@
 
 #include "point_cloud_raster.cuh"
 
+#include "core/cuda_allocation.hpp"
 #include <cmath>
 #include <cstdint>
 #include <cuda_runtime.h>
@@ -272,7 +273,7 @@ namespace lfs::rendering::pcraster {
         const std::size_t pixels = static_cast<std::size_t>(params.width) *
                                    static_cast<std::size_t>(params.height);
         std::uint64_t* packed = nullptr;
-        cudaError_t status = cudaMallocAsync(reinterpret_cast<void**>(&packed),
+        cudaError_t status = ::lfs::core::malloc_async(reinterpret_cast<void**>(&packed),
                                              pixels * sizeof(std::uint64_t), params.stream);
         if (status != cudaSuccess) {
             return status;
@@ -283,7 +284,7 @@ namespace lfs::rendering::pcraster {
         clearPackedBuffer<<<clear_blocks, clear_threads, 0, params.stream>>>(
             packed, static_cast<int>(pixels));
         if ((status = cudaGetLastError()) != cudaSuccess) {
-            cudaFreeAsync(packed, params.stream);
+            ::lfs::core::free_async(packed, params.stream);
             return status;
         }
 
@@ -292,7 +293,7 @@ namespace lfs::rendering::pcraster {
             static_cast<int>((params.n_points + raster_threads - 1) / raster_threads);
         rasterizePointsKernel<<<raster_blocks, raster_threads, 0, params.stream>>>(params, packed);
         if ((status = cudaGetLastError()) != cudaSuccess) {
-            cudaFreeAsync(packed, params.stream);
+            ::lfs::core::free_async(packed, params.stream);
             return status;
         }
 
@@ -306,7 +307,7 @@ namespace lfs::rendering::pcraster {
             params.transparent_background, params.far_plane,
             params.image, params.depth);
         status = cudaGetLastError();
-        cudaFreeAsync(packed, params.stream);
+        ::lfs::core::free_async(packed, params.stream);
         return status;
     }
 

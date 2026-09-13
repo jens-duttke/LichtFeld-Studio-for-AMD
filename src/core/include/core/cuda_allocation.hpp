@@ -16,6 +16,61 @@
 
 namespace lfs::core {
 
+    // Stream-ordered memory pools are an optional device capability, not a
+    // guaranteed property of a sufficiently new CUDA runtime. Probe the device
+    // once so callers can fall back to plain cudaMalloc instead of issuing
+    // cudaMallocAsync calls the driver rejects — those failures latch a sticky
+    // error that later, unrelated CUDA calls then report as their own.
+    [[nodiscard]] inline bool cuda_async_mempools_supported() noexcept {
+#if CUDART_VERSION >= 11020
+        static const bool supported = []() noexcept {
+            int device = 0;
+            if (cudaGetDevice(&device) != cudaSuccess) {
+                (void)cudaGetLastError();
+                return false;
+            }
+            int value = 0;
+            if (cudaDeviceGetAttribute(&value, cudaDevAttrMemoryPoolsSupported, device) !=
+                cudaSuccess) {
+                (void)cudaGetLastError();
+                return false;
+            }
+            return value != 0;
+        }();
+        return supported;
+#else
+        return false;
+#endif
+    }
+
+    // Drop-in wrappers for the stream-ordered allocation pair. They keep the
+    // asynchronous path where the device provides it and fall back to the
+    // synchronous allocator where it does not, so call sites do not each have
+    // to repeat the capability test.
+    template <typename T>
+    [[nodiscard]] inline cudaError_t malloc_async(T** ptr, const size_t bytes,
+                                                  const cudaStream_t stream) noexcept {
+#if CUDART_VERSION >= 11020
+        if (cuda_async_mempools_supported()) {
+            return cudaMallocAsync(ptr, bytes, stream);
+        }
+#else
+        (void)stream;
+#endif
+        return cudaMalloc(reinterpret_cast<void**>(ptr), bytes);
+    }
+
+    [[nodiscard]] inline cudaError_t free_async(void* ptr, const cudaStream_t stream) noexcept {
+#if CUDART_VERSION >= 11020
+        if (cuda_async_mempools_supported()) {
+            return cudaFreeAsync(ptr, stream);
+        }
+#else
+        (void)stream;
+#endif
+        return cudaFree(ptr);
+    }
+
     struct DirectCudaAllocator {
         [[nodiscard]] void* allocate(const size_t bytes,
                                      cudaStream_t,
@@ -43,8 +98,13 @@ namespace lfs::core {
                                      const std::string_view label) const {
             void* ptr = nullptr;
 #if CUDART_VERSION >= 11020
-            LFS_CUDA_CHECK_MSG(cudaMallocAsync(&ptr, bytes, stream),
-                               "stream-ordered CUDA allocation '{}' ({} bytes)", label, bytes);
+            if (cuda_async_mempools_supported()) {
+                LFS_CUDA_CHECK_MSG(cudaMallocAsync(&ptr, bytes, stream),
+                                   "stream-ordered CUDA allocation '{}' ({} bytes)", label, bytes);
+            } else {
+                LFS_CUDA_CHECK_MSG(cudaMalloc(&ptr, bytes),
+                                   "CUDA allocation '{}' ({} bytes)", label, bytes);
+            }
 #else
             LFS_CUDA_CHECK_MSG(cudaMalloc(&ptr, bytes),
                                "CUDA allocation '{}' ({} bytes)", label, bytes);
@@ -54,7 +114,9 @@ namespace lfs::core {
 
         void deallocate(void* ptr, const cudaStream_t stream) const noexcept {
 #if CUDART_VERSION >= 11020
-            const cudaError_t status = cudaFreeAsync(ptr, stream);
+            const cudaError_t status = cuda_async_mempools_supported()
+                                           ? cudaFreeAsync(ptr, stream)
+                                           : cudaFree(ptr);
 #else
             const cudaError_t status = cudaFree(ptr);
 #endif

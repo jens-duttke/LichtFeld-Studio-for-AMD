@@ -136,6 +136,12 @@ namespace lfs::vis {
             ExternalNativeHandle native_handle = kInvalidExternalNativeHandle;
             bool census_counted = false;
             bool sparse = false;
+            // Mirrored buffers back a CUDA block that could not be exported.
+            // Their memory is host-visible and permanently mapped so CUDA can
+            // copy into it; `mirrored_source` is the CUDA pointer to copy from.
+            bool mirrored = false;
+            void* mapped = nullptr;
+            const void* mirrored_source = nullptr;
         };
 
         struct ExternalSemaphore {
@@ -345,6 +351,18 @@ namespace lfs::vis {
                                                  std::string_view diagnostic_label = {});
         [[nodiscard]] bool bindNewChunks(ExternalBuffer& imported,
                                          const lfs::core::ExportableBlock& block);
+        // Refreshes a mirrored buffer from its CUDA source. No-op for imported
+        // (shared-memory) buffers, where CUDA writes are already visible.
+        // `bytes` == 0 copies the whole buffer.
+        [[nodiscard]] bool syncMirroredBuffer(ExternalBuffer& buffer,
+                                              std::size_t offset = 0,
+                                              std::size_t bytes = 0);
+        // Host-visible stand-in for a block the device cannot export.
+        [[nodiscard]] bool createMirroredBuffer(const lfs::core::ExportableBlock& block,
+                                                VkBufferUsageFlags usage,
+                                                ExternalBuffer& out,
+                                                std::string_view diagnostic_scope,
+                                                std::string_view diagnostic_label);
         [[nodiscard]] bool sparseBindingEnabled() const { return sparse_binding_enabled_; }
         [[nodiscard]] bool bufferDeviceAddressEnabled() const { return buffer_device_address_enabled_; }
         [[nodiscard]] bool createExternalTimelineSemaphore(

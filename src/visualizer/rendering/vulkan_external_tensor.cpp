@@ -154,15 +154,33 @@ namespace lfs::vis {
         return context_->bindNewChunks(buffer_, block);
     }
 
+    bool VulkanExternalTensorStorage::syncMirrored() {
+        if (parent_) {
+            return parent_->syncMirrored();
+        }
+        if (!context_) {
+            return false;
+        }
+        return context_->syncMirroredBuffer(buffer_);
+    }
+
+    bool VulkanExternalTensorStorage::isMirrored() const {
+        if (parent_) {
+            return parent_->isMirrored();
+        }
+        return buffer_.mirrored;
+    }
+
     std::expected<lfs::core::Tensor, std::string> makeVulkanExternalTensor(
         VulkanContext& context,
         lfs::core::TensorShape shape,
         const lfs::core::DataType dtype,
         const std::size_t capacity,
         const char* const debug_name) {
-        if (!context.externalMemoryInteropEnabled()) {
-            return std::unexpected("Vulkan external tensor allocation requires CUDA/Vulkan external-memory interop");
-        }
+        // Without interop this still succeeds: allocateExportableDeviceBlock
+        // hands back a mirrored block and the import creates a host-visible
+        // Vulkan buffer, so the binding path below is identical. Only the data
+        // transfer differs — see syncMirroredSplatStorages.
         if (shape.rank() == 0) {
             return std::unexpected("Vulkan external tensor allocation requires a non-scalar tensor shape");
         }
@@ -489,7 +507,7 @@ namespace lfs::vis {
     lfs::core::SplatTensorAllocator makeViewerSplatTensorAllocator() {
         auto* const window_manager = services().windowOrNull();
         auto* const context = window_manager ? window_manager->getVulkanContext() : nullptr;
-        if (!context || !context->externalMemoryInteropEnabled()) {
+        if (!context) {
             return {};
         }
 

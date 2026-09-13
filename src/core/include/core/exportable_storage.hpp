@@ -62,10 +62,21 @@ namespace lfs::core {
         std::vector<ExportableChunk> chunks;
         std::shared_ptr<void> state; // opaque OwnedAllocation
 
+        // Set when the device cannot export shareable memory and the block is
+        // plain cudaMalloc storage instead of a VMM reservation. Such a block
+        // has no chunks and no export handles: Vulkan cannot import it, so a
+        // consumer must own a separate device-local buffer and copy into it.
+        bool mirrored = false;
+
         [[nodiscard]] std::size_t committedPrefixBytes() const noexcept;
     };
 
     [[nodiscard]] inline std::size_t ExportableBlock::committedPrefixBytes() const noexcept {
+        if (mirrored) {
+            // Plain device storage: no chunk list, and the whole allocation is
+            // contiguous and committed from the first byte.
+            return committed_bytes;
+        }
         std::size_t prefix = 0;
         for (const auto& chunk : chunks) {
             if (chunk.offset > prefix) {
@@ -100,6 +111,13 @@ namespace lfs::core {
         }
         return unbound;
     }
+
+    // Whether `device` can back exportable blocks at all: CUDA virtual memory
+    // management plus the platform's shareable handle type. Callers that decide
+    // between the shared-memory viewer path and a CUDA-resident one should ask
+    // here first — the Vulkan side advertising its external-memory extensions
+    // says nothing about whether CUDA can produce a handle to import.
+    [[nodiscard]] bool exportable_memory_supported(int device = 0);
 
     // CUDA VMM allocation granularity for `device` (2 MiB on current NVIDIA).
     [[nodiscard]] std::size_t exportable_allocation_granularity(int device = 0);

@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/cuda_error.hpp"
+#include "core/cuda_allocation.hpp"
 #include "internal/gpu_config.hpp"
 #include "internal/lazy_config.hpp"
 #include "internal/lazy_executor.hpp"
@@ -356,7 +357,7 @@ namespace lfs::core::tensor_ops {
         const int grid_size = gpu.optimal_grid_size(BLOCK_SIZE);
 
         float* partial = nullptr;
-        LFS_CUDA_CHECK(cudaMallocAsync(&partial, grid_size * sizeof(float), stream));
+        LFS_CUDA_CHECK(::lfs::core::malloc_async(&partial, grid_size * sizeof(float), stream));
         assert(partial != nullptr);
 
         fused_transform_reduce_stage1_kernel<<<grid_size, BLOCK_SIZE, 0, stream>>>(
@@ -374,7 +375,7 @@ namespace lfs::core::tensor_ops {
             record_tensor_kernel_launch(1);
         }
 
-        LFS_CUDA_CHECK_MSG(cudaFreeAsync(partial, stream),
+        LFS_CUDA_CHECK_MSG(::lfs::core::free_async(partial, stream),
                            "fused transform-reduce partial buffer");
     }
 

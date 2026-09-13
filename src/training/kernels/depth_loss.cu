@@ -2,6 +2,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "core/cuda_error.hpp"
+#include "core/cuda_allocation.hpp"
 #include "core/logger.hpp"
 #include "depth_loss.hpp"
 #include "lfs/core/warp_reduce.cuh"
@@ -682,11 +683,11 @@ namespace lfs::training::kernels {
 
         float2* pairs_dev = nullptr;
         int* count_dev = nullptr;
-        if (cudaMallocAsync(&pairs_dev, sizeof(float2) * kMaxAnchorSamples, stream) != cudaSuccess) {
+        if (::lfs::core::malloc_async(&pairs_dev, sizeof(float2) * kMaxAnchorSamples, stream) != cudaSuccess) {
             return {};
         }
-        if (cudaMallocAsync(&count_dev, sizeof(int), stream) != cudaSuccess) {
-            cudaFreeAsync(pairs_dev, stream);
+        if (::lfs::core::malloc_async(&count_dev, sizeof(int), stream) != cudaSuccess) {
+            ::lfs::core::free_async(pairs_dev, stream);
             return {};
         }
         cudaMemsetAsync(count_dev, 0, sizeof(int), stream);
@@ -701,8 +702,8 @@ namespace lfs::training::kernels {
             pairs_dev, count_dev, pair_capacity);
         if (const cudaError_t err = cudaGetLastError(); err != cudaSuccess) {
             LOG_ERROR("depth_anchor_collect_kernel launch failed: {}", cudaGetErrorString(err));
-            cudaFreeAsync(pairs_dev, stream);
-            cudaFreeAsync(count_dev, stream);
+            ::lfs::core::free_async(pairs_dev, stream);
+            ::lfs::core::free_async(count_dev, stream);
             return {};
         }
 
@@ -712,14 +713,14 @@ namespace lfs::training::kernels {
             LFS_CUDA_AWAIT(anchor_ticket, cudaStreamSynchronize(stream), "training.depth.anchor_count_readback");
         } catch (const std::exception& e) {
             LOG_ERROR("depth anchor count readback failed: {}", e.what());
-            cudaFreeAsync(pairs_dev, stream);
-            cudaFreeAsync(count_dev, stream);
+            ::lfs::core::free_async(pairs_dev, stream);
+            ::lfs::core::free_async(count_dev, stream);
             return {};
         }
         pair_count = std::min(pair_count, pair_capacity);
         if (pair_count < kMinAnchorSamples) {
-            cudaFreeAsync(pairs_dev, stream);
-            cudaFreeAsync(count_dev, stream);
+            ::lfs::core::free_async(pairs_dev, stream);
+            ::lfs::core::free_async(count_dev, stream);
             return {};
         }
 
@@ -732,12 +733,12 @@ namespace lfs::training::kernels {
             LFS_CUDA_AWAIT(pairs_ticket, cudaStreamSynchronize(stream), "training.depth.anchor_pairs_readback");
         } catch (const std::exception& e) {
             LOG_ERROR("depth anchor pairs readback failed: {}", e.what());
-            cudaFreeAsync(pairs_dev, stream);
-            cudaFreeAsync(count_dev, stream);
+            ::lfs::core::free_async(pairs_dev, stream);
+            ::lfs::core::free_async(count_dev, stream);
             return {};
         }
-        cudaFreeAsync(pairs_dev, stream);
-        cudaFreeAsync(count_dev, stream);
+        ::lfs::core::free_async(pairs_dev, stream);
+        ::lfs::core::free_async(count_dev, stream);
         return pairs;
     }
 

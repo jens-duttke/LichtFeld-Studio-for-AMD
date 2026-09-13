@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "adam_api.h"
+#include "core/cuda_allocation.hpp"
 #include "adam_kernels.cuh"
 #include "optimizer_config.h"
 #include "utils.h"
@@ -224,8 +225,8 @@ namespace fast_lfs::optimizer {
             (static_cast<std::size_t>(n_blocks) + 3u) & ~static_cast<std::size_t>(3u);
         std::uint8_t* flags = nullptr;
         std::uint8_t* block_touched = nullptr;
-        LFS_CUDA_CHECK(cudaMallocAsync(&flags, static_cast<std::size_t>(n_prims), stream));
-        LFS_CUDA_CHECK(cudaMallocAsync(&block_touched, touched_bytes, stream));
+        LFS_CUDA_CHECK(::lfs::core::malloc_async(&flags, static_cast<std::size_t>(n_prims), stream));
+        LFS_CUDA_CHECK(::lfs::core::malloc_async(&block_touched, touched_bytes, stream));
         LFS_CUDA_CHECK(cudaMemsetAsync(flags, 0, static_cast<std::size_t>(n_prims), stream));
         LFS_CUDA_CHECK(cudaMemsetAsync(block_touched, 0, touched_bytes, stream));
 
@@ -243,8 +244,8 @@ namespace fast_lfs::optimizer {
                 packed, bounds, flags, block_touched, n_attr, n_prims);
         }
         LFS_CUDA_LAUNCH_CHECK(stream, "joint_encode_zero_rows_at_indices");
-        LFS_CUDA_CHECK(cudaFreeAsync(flags, stream));
-        LFS_CUDA_CHECK(cudaFreeAsync(block_touched, stream));
+        LFS_CUDA_CHECK(::lfs::core::free_async(flags, stream));
+        LFS_CUDA_CHECK(::lfs::core::free_async(block_touched, stream));
     }
 
     void joint_encode_zero_shN_at_indices(
@@ -274,8 +275,8 @@ namespace fast_lfs::optimizer {
             (static_cast<std::size_t>(n_blocks) + 3u) & ~static_cast<std::size_t>(3u);
         std::uint8_t* flags = nullptr;
         std::uint8_t* block_touched = nullptr;
-        LFS_CUDA_CHECK(cudaMallocAsync(&flags, static_cast<std::size_t>(n_prims), stream));
-        LFS_CUDA_CHECK(cudaMallocAsync(&block_touched, touched_bytes, stream));
+        LFS_CUDA_CHECK(::lfs::core::malloc_async(&flags, static_cast<std::size_t>(n_prims), stream));
+        LFS_CUDA_CHECK(::lfs::core::malloc_async(&block_touched, touched_bytes, stream));
         LFS_CUDA_CHECK(cudaMemsetAsync(flags, 0, static_cast<std::size_t>(n_prims), stream));
         LFS_CUDA_CHECK(cudaMemsetAsync(block_touched, 0, touched_bytes, stream));
 
@@ -293,8 +294,8 @@ namespace fast_lfs::optimizer {
                 packed, bounds, flags, block_touched, slots_per_primitive, n_prims);
         }
         LFS_CUDA_LAUNCH_CHECK(stream, "joint_encode_zero_shN_at_indices");
-        LFS_CUDA_CHECK(cudaFreeAsync(flags, stream));
-        LFS_CUDA_CHECK(cudaFreeAsync(block_touched, stream));
+        LFS_CUDA_CHECK(::lfs::core::free_async(flags, stream));
+        LFS_CUDA_CHECK(::lfs::core::free_async(block_touched, stream));
     }
 
     void joint_transcode_gathered_rows_at_indices(

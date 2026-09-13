@@ -59,6 +59,12 @@ namespace lfs::vis {
         [[nodiscard]] VkDeviceAddress vkDeviceAddress() const;
         [[nodiscard]] std::size_t bytes() const;
         [[nodiscard]] bool bindNewExportableChunks(const lfs::core::ExportableBlock& block);
+        // Copies the CUDA side into the Vulkan buffer when this storage is
+        // mirrored (no shared memory). No-op — and cheap — otherwise. Sub-views
+        // forward to the owning parent, so syncing one view refreshes the whole
+        // block; callers should sync each distinct root once per frame.
+        [[nodiscard]] bool syncMirrored();
+        [[nodiscard]] bool isMirrored() const;
 
     private:
         // Owned-variant members (only meaningful when parent_ is nullptr).

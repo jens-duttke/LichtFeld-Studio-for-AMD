@@ -674,6 +674,9 @@ namespace fast_lfs::rasterization::kernels::forward {
         __shared__ float4 collected_color[config::block_size_blend_forward];
         __shared__ float collected_depth[config::block_size_blend_forward];
         __shared__ float3 collected_normal[kRenderNormal ? config::block_size_blend_forward : 1];
+#ifdef LFS_NO_BARRIER_REDUCTION
+        __shared__ int s_all_done;
+#endif
 
         float3 color_pixel0 = make_float3(0.0f);
         float3 color_pixel1 = make_float3(0.0f);
@@ -693,8 +696,23 @@ namespace fast_lfs::rasterization::kernels::forward {
         for (int n_points_remaining = n_points_total, batch_base = 0;
              n_points_remaining > 0;
              n_points_remaining -= batch_size, batch_base += batch_size) {
+#ifdef LFS_NO_BARRIER_REDUCTION
+            // __syncthreads_count lowers to the PTX barrier-reduction
+            // instruction bar.red, which not every CUDA implementation
+            // provides. Emulate the "every thread finished" test with a shared
+            // flag; equivalent semantics at the cost of one extra barrier.
+            if (thread_rank == 0)
+                s_all_done = 1;
+            __syncthreads();
+            if (!(done0 && done1))
+                s_all_done = 0;
+            __syncthreads();
+            if (s_all_done != 0)
+                break;
+#else
             if (__syncthreads_count(done0 && done1) == config::block_size_blend_forward)
                 break;
+#endif
 
             if (static_cast<int>(thread_rank) < batch_size) {
                 const int fetch_idx = static_cast<int>(tile_range.x) + batch_base + static_cast<int>(thread_rank);

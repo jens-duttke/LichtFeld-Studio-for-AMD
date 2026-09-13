@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: GPL-3.0-or-later */
 
 #include "io/nvcodec_image_loader.hpp"
+#include "core/cuda_allocation.hpp"
 #include "core/assert.hpp"
 #include "core/cuda/lanczos_resize/lanczos_resize.hpp"
 #include "core/environment.hpp"
@@ -735,7 +736,7 @@ namespace lfs::io {
                 return 0;
             }
 
-            const cudaError_t status = cudaFreeAsync(ptr, stream);
+            const cudaError_t status = ::lfs::core::free_async(ptr, stream);
             if (status == cudaSuccess) {
                 size_t used = impl->device_bytes_in_use.load(std::memory_order_acquire);
                 while (used != 0) {
@@ -1091,6 +1092,16 @@ namespace lfs::io {
             impl_->vram_account.set_baseline_bytes(baseline_bytes);
             LOG_INFO("[NvCodecImageLoader] Accounted nvImageCodec init VRAM: {:.1f} MiB",
                      static_cast<double>(baseline_bytes.total()) / (1024.0 * 1024.0));
+        }
+
+        // nvImageCodec probes optional driver capabilities while it initializes.
+        // Where one is unavailable the runtime keeps the status latched, and the
+        // next CUDA call made by this library — a tensor upload, a format
+        // conversion kernel — reports that foreign failure as its own. Clear it
+        // here so decoder setup cannot poison unrelated work.
+        if (const cudaError_t latched = cudaGetLastError(); latched != cudaSuccess) {
+            LOG_DEBUG("[NvCodecImageLoader] Cleared CUDA status left by decoder init: {}",
+                      cudaGetErrorString(latched));
         }
     }
 

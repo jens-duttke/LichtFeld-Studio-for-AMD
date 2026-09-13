@@ -5,6 +5,7 @@
 
 #include "allocation_profiler.hpp"
 #include "core/alloc_counter.hpp"
+#include "core/cuda_allocation.hpp"
 #include "core/cuda_error.hpp"
 #include "core/export.hpp"
 #include "core/logger.hpp"
@@ -43,6 +44,10 @@ namespace lfs::core {
         ExactAsync,
         Direct,
     };
+
+    // cuda_async_mempools_supported() lives in core/cuda_allocation.hpp so the
+    // pool tiers, the size-bucketed pool and the standalone allocators all make
+    // the same decision about stream-ordered allocation.
 
     LFS_CORE_API void* allocate_cuda_storage(
         size_t bytes,
@@ -183,6 +188,7 @@ namespace lfs::core {
                 const size_t bucket_size = SizeBucketedPool::get_bucket_size(bytes);
 
 #if CUDART_VERSION >= 12080
+                if (cuda_async_mempools_supported()) {
                 const auto pre_call_state = sample_cuda_pre_call_state(stream);
                 cudaError_t err = cudaMallocAsync(&ptr, bucket_size, stream);
                 if (err == cudaSuccess) {
@@ -202,11 +208,12 @@ namespace lfs::core {
                                     ::lfs::core::detail::format_cuda_safe("bucket_bytes={}", bucket_size),
                                     LFS_SOURCE_SITE_CURRENT(),
                                     CudaFailureDisposition::LogOnly);
+                }
 #endif
             }
 
 #if CUDART_VERSION >= 12080
-            {
+            if (cuda_async_mempools_supported()) {
                 const auto pre_call_state = sample_cuda_pre_call_state(stream);
                 cudaError_t err = cudaMallocAsync(&ptr, bytes, stream);
                 if (err == cudaSuccess) {
@@ -259,6 +266,11 @@ namespace lfs::core {
 
             std::shared_lock stream_routing_lock(stream_routing_mutex_);
 #if CUDART_VERSION >= 12080
+            if (!cuda_async_mempools_supported()) {
+                // No stream-ordered pool on this device: the exact-async tier
+                // degrades to the tracked direct tier.
+                return try_allocate_direct(bytes, failure_status);
+            }
             void* ptr = nullptr;
             const auto pre_call_state = sample_cuda_pre_call_state(stream);
             const cudaError_t err = cudaMallocAsync(&ptr, bytes, stream);
@@ -422,7 +434,9 @@ namespace lfs::core {
             }
 
 #if CUDART_VERSION >= 12080
-            const cudaError_t free_status = cudaFreeAsync(ptr, stream);
+            const cudaError_t free_status = cuda_async_mempools_supported()
+                                                ? cudaFreeAsync(ptr, stream)
+                                                : cudaFree(ptr);
 #else
             const cudaError_t free_status = cudaFree(ptr);
 #endif
@@ -452,6 +466,11 @@ namespace lfs::core {
 
         void configure() {
 #if CUDART_VERSION >= 12080
+            if (!cuda_async_mempools_supported()) {
+                LOG_DEBUG("CUDA stream-ordered memory pools unsupported on this device; "
+                          "using the direct cudaMalloc tier");
+                return;
+            }
             const auto pre_call_state = sample_cuda_pre_call_state();
             int device;
             cudaError_t err = cudaGetDevice(&device);
@@ -743,7 +762,9 @@ namespace lfs::core {
             }
 
 #if CUDART_VERSION >= 12080
-            const cudaError_t free_status = cudaFreeAsync(ptr, info.home_stream);
+            const cudaError_t free_status = cuda_async_mempools_supported()
+                                                ? cudaFreeAsync(ptr, info.home_stream)
+                                                : cudaFree(ptr);
 #else
             const cudaError_t free_status = cudaFree(ptr);
 #endif
@@ -820,6 +841,9 @@ namespace lfs::core {
         static bool try_get_default_pool(int& device,
                                          cudaMemPool_t& pool,
                                          const std::string_view context) {
+            if (!cuda_async_mempools_supported()) {
+                return false;
+            }
             const cudaError_t device_status = cudaGetDevice(&device);
             if (device_status != cudaSuccess) {
                 ensure_cuda_success(
