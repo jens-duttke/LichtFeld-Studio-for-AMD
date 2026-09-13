@@ -4431,6 +4431,7 @@ namespace lfs::vis::gui {
         applyDefaultStyle();
         rebuildFonts(scale);
         current_ui_scale_ = scale;
+        lfs::python::request_redraw();
 
         LOG_INFO("UI scale applied: {:.2f}", scale);
     }
@@ -5310,7 +5311,8 @@ namespace lfs::vis::gui {
                 SceneManager* const scene_manager = viewer_->getSceneManager();
                 std::optional<SceneRenderState> overlay_scene_state;
                 if (scene_manager && (settings.show_crop_box || settings.show_ellipsoid)) {
-                    overlay_scene_state = scene_manager->buildRenderState();
+                    overlay_scene_state =
+                        scene_manager->buildRenderState({.metadata_only = true});
                 }
                 const GizmoState gizmo_state = rendering_manager->getGizmoState();
                 appendVulkanSceneGuideOverlays(params,
@@ -8077,6 +8079,7 @@ namespace lfs::vis::gui {
             } else {
                 pending_ui_scale_ = std::clamp(e.scale, 1.0f, 4.0f);
             }
+            lfs::python::request_redraw();
         });
 
         state::DiskSpaceSaveFailed::when([this](const auto& e) {
