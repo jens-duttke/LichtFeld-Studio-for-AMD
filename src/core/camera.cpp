@@ -157,6 +157,10 @@ namespace lfs::core {
                 "camera stream creation, falling back to default stream",
                 stream_create_site);
             _stream = nullptr;
+            // The fallback is a full recovery, but the runtime keeps the status
+            // latched. Left in place it surfaces as a pre-existing error on the
+            // next unrelated call and aborts work that was never at fault.
+            (void)cudaGetLastError();
         }
     }
 
@@ -341,6 +345,10 @@ namespace lfs::core {
                 "camera stream creation, falling back to default stream",
                 stream_create_site);
             _stream = nullptr;
+            // The fallback is a full recovery, but the runtime keeps the status
+            // latched. Left in place it surfaces as a pre-existing error on the
+            // next unrelated call and aborts work that was never at fault.
+            (void)cudaGetLastError();
         }
     }
     Tensor Camera::K() const {
