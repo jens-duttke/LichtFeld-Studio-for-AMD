@@ -1111,15 +1111,11 @@ namespace lfs::core {
         // kind. Not every CUDA implementation does so reliably — translation
         // layers may report pinned host blocks as managed, which turns the
         // check into a false positive that aborts otherwise valid work.
-        // LFS_DISABLE_POINTER_TAG_CHECK=1 opts out; the guard stays on by
-        // default so genuine tag bugs keep failing loudly.
-        static const bool tag_check_disabled = [] {
-            const char* const value = std::getenv("LFS_DISABLE_POINTER_TAG_CHECK");
-            return value != nullptr && value[0] != '\0' && value[0] != '0';
-        }();
-        if (tag_check_disabled) {
-            return;
-        }
+        // The classification is only questioned where it actually disagrees
+        // with the tag: cuda_pointer_tags_trustworthy() then re-allocates the
+        // same amount of memory itself and stands the guard down only if the
+        // implementation misreports that too. Genuine tag bugs keep failing
+        // loudly everywhere else.
 
         // Empty / null storage: nothing to validate.
         if (data_ == nullptr || numel() == 0) {
@@ -1132,7 +1128,7 @@ namespace lfs::core {
             // Not a CUDA-visible pointer (ordinary host malloc, etc.).
             // Clear sticky error; CPU tensors may legitimately live here.
             (void)cudaGetLastError();
-            if (device_ == Device::CUDA) {
+            if (device_ == Device::CUDA && lfs::core::cuda_pointer_tags_trustworthy(bytes())) {
                 throw TensorError(
                     "device-tag mismatch: CUDA-tagged tensor storage is not CUDA-addressable "
                     "(cudaPointerGetAttributes failed) — refusing raw-pointer escape");
@@ -1141,19 +1137,31 @@ namespace lfs::core {
         }
 
         // CUDA 11+: attrs.type distinguishes device / host / managed / unregistered.
+        // What this guard actually protects is the host-side use of the
+        // pointer, so managed storage that carries a valid host mapping is not
+        // a hazard: the CPU can read and write it and cudaMemcpy HostToDevice
+        // accepts it. Only storage the host cannot reach is rejected below.
         const bool is_device_mem =
-            attrs.type == cudaMemoryTypeDevice || attrs.type == cudaMemoryTypeManaged;
+            attrs.type == cudaMemoryTypeDevice ||
+            (attrs.type == cudaMemoryTypeManaged && attrs.hostPointer == nullptr);
         // Pinned host (cudaHostAlloc) and ordinary host registered with CUDA.
         const bool is_host_mem =
             attrs.type == cudaMemoryTypeHost || attrs.type == cudaMemoryTypeUnregistered;
 
         if (device_ == Device::CPU && is_device_mem) {
-            throw TensorError(
-                "device-tag mismatch: CPU-tagged tensor carries device (or managed) storage "
-                "— refusing raw-pointer escape (would break cudaMemcpy HostToDevice)");
+            if (!lfs::core::cuda_pointer_tags_trustworthy(bytes())) {
+                return;
+            }
+            throw TensorError(std::format(
+                "device-tag mismatch: CPU-tagged tensor carries host-unreachable device storage "
+                "— refusing raw-pointer escape (would break cudaMemcpy HostToDevice) "
+                "(reported type {}, pointer {}, host mapping {}, device mapping {}, {} bytes)",
+                static_cast<int>(attrs.type), data_, attrs.hostPointer, attrs.devicePointer,
+                bytes()));
         }
         if (device_ == Device::CUDA && is_host_mem &&
-            attrs.type == cudaMemoryTypeUnregistered) {
+            attrs.type == cudaMemoryTypeUnregistered &&
+            lfs::core::cuda_pointer_tags_trustworthy(bytes())) {
             // Unregistered host pointer tagged CUDA is almost always a bug.
             // Pinned host (cudaMemoryTypeHost) is allowed only for rare staging
             // views; still reject pure pageable host tagged as CUDA.

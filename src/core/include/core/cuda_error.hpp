@@ -239,6 +239,15 @@ namespace lfs::core {
         const void* pointer,
         std::string_view name,
         SourceSite location);
+    // True unless this CUDA implementation can be shown to misclassify memory
+    // it allocated itself. Callers ask right before they would fail a
+    // pointer-tag assertion, passing the size of the allocation in question:
+    // the answer comes from a fresh device and pinned-host allocation of that
+    // same size, so a misreport has to be demonstrated — never assumed — and
+    // the classification test is only ever skipped where it cannot be
+    // believed. The null checks around it always stay in force.
+    // LFS_DISABLE_POINTER_TAG_CHECK=1 forces the same result without probing.
+    [[nodiscard]] LFS_CORE_API bool cuda_pointer_tags_trustworthy(std::size_t probe_bytes = 0);
 
 } // namespace lfs::core
 

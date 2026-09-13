@@ -14,6 +14,7 @@
 #include <atomic>
 #include <cctype>
 #include <chrono>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <format>
@@ -882,23 +883,109 @@ namespace lfs::core {
         const cudaError_t result = cudaPointerGetAttributes(&attributes, pointer);
         finish_cuda_check(result, state, "cudaPointerGetAttributes(&attributes, pointer)",
                           std::format("validating CUDA pointer '{}' ({})", name, pointer), location);
-        // Same opt-out as Tensor::assert_device_storage_matches_tag: this
-        // contract is only as trustworthy as cudaPointerGetAttributes, and
-        // implementations exist that misreport device memory as managed.
-        // LFS_DISABLE_POINTER_TAG_CHECK=1 skips the classification test while
-        // keeping the null check above.
-        static const bool tag_check_disabled = [] {
-            const char* const value = std::getenv("LFS_DISABLE_POINTER_TAG_CHECK");
-            return value != nullptr && value[0] != '\0' && value[0] != '0';
-        }();
-        if (!tag_check_disabled && attributes.type != cudaMemoryTypeDevice) {
+        // What the callers need is a pointer their kernels can dereference, so
+        // managed storage with a device mapping satisfies the contract just as
+        // plain device storage does — some implementations report device
+        // allocations that way. Host and unregistered pointers still fail, and
+        // cuda_pointer_tags_trustworthy() is the last resort for an
+        // implementation whose classification cannot be believed at all.
+        const bool device_reachable =
+            attributes.type == cudaMemoryTypeDevice ||
+            (attributes.type == cudaMemoryTypeManaged && attributes.devicePointer != nullptr);
+        if (!device_reachable && cuda_pointer_tags_trustworthy()) {
             detail::assertion_failed(
-                "LFS boundary contract", "attributes.type == cudaMemoryTypeDevice",
-                std::format("CUDA pointer '{}' has memory type {} instead of device type {}",
-                            name, static_cast<int>(attributes.type),
-                            static_cast<int>(cudaMemoryTypeDevice)),
+                "LFS boundary contract", "pointer is device-reachable",
+                std::format("CUDA pointer '{}' has memory type {} with device mapping {} "
+                            "— kernels cannot dereference it",
+                            name, static_cast<int>(attributes.type), attributes.devicePointer),
                 location);
         }
+    }
+
+    bool cuda_pointer_tags_trustworthy(const std::size_t probe_bytes) {
+        // Asked at the moment a pointer-tag assertion would fire. Rather than
+        // trusting a one-shot guess about the implementation, this allocates
+        // device and pinned-host memory of the same size right here and checks
+        // how the implementation classifies its own, known-good result. Only a
+        // demonstrated misreport stands the assertions down — and once shown,
+        // it holds for the rest of the process.
+        static std::atomic<bool> misreport_proven{false};
+        if (misreport_proven.load(std::memory_order_acquire)) {
+            return false;
+        }
+        static const bool disabled_by_env = [] {
+            const char* const value = std::getenv("LFS_DISABLE_POINTER_TAG_CHECK");
+            if (value == nullptr) {
+                return false;
+            }
+            const std::string_view text{value};
+            if (text.empty() || text == "0") {
+                return false;
+            }
+            LOG_INFO("CUDA pointer-tag checks disabled by LFS_DISABLE_POINTER_TAG_CHECK");
+            return true;
+        }();
+        if (disabled_by_env) {
+            return false;
+        }
+
+        // Classification can depend on the allocation size, so the probe
+        // matches the caller's. Very large requests are capped: the probe must
+        // not become an allocation failure of its own.
+        constexpr std::size_t probe_cap = 64u << 20;
+        const std::size_t bytes = std::clamp<std::size_t>(probe_bytes, 256, probe_cap);
+        const std::size_t interior = bytes / 2;
+        const auto classify = [](const void* const pointer) {
+            cudaPointerAttributes attributes{};
+            const cudaError_t status = cudaPointerGetAttributes(&attributes, pointer);
+            (void)cudaGetLastError();
+            return status == cudaSuccess ? std::optional<cudaMemoryType>(attributes.type)
+                                         : std::nullopt;
+        };
+        const auto describe = [](const std::optional<cudaMemoryType> type) {
+            return type ? static_cast<int>(*type) : -1;
+        };
+
+        void* device_probe = nullptr;
+        if (cudaMalloc(&device_probe, bytes) != cudaSuccess) {
+            // Inconclusive: nothing was proven, so the assertions stay armed.
+            (void)cudaGetLastError();
+            return true;
+        }
+        const auto device_base = classify(device_probe);
+        const auto device_interior =
+            classify(static_cast<const std::uint8_t*>(device_probe) + interior);
+        (void)cudaFree(device_probe);
+
+        void* host_probe = nullptr;
+        if (cudaHostAlloc(&host_probe, bytes, cudaHostAllocDefault) != cudaSuccess) {
+            (void)cudaGetLastError();
+            return true;
+        }
+        const auto host_base = classify(host_probe);
+        const auto host_interior =
+            classify(static_cast<const std::uint8_t*>(host_probe) + interior);
+        (void)cudaFreeHost(host_probe);
+
+        const bool device_ok =
+            device_base == cudaMemoryTypeDevice && device_interior == cudaMemoryTypeDevice;
+        const bool host_ok =
+            host_base == cudaMemoryTypeHost && host_interior == cudaMemoryTypeHost;
+        if (device_ok && host_ok) {
+            return true;
+        }
+        if (!misreport_proven.exchange(true, std::memory_order_acq_rel)) {
+            LOG_WARN("cudaPointerGetAttributes misclassifies this implementation's own memory: "
+                     "a {} byte device allocation is reported as {}/{} (expected {}) and a "
+                     "pinned host allocation as {}/{} (expected {}). Pointer-tag checks are "
+                     "disabled for this process; null and range checks stay in force",
+                     bytes,
+                     describe(device_base), describe(device_interior),
+                     static_cast<int>(cudaMemoryTypeDevice),
+                     describe(host_base), describe(host_interior),
+                     static_cast<int>(cudaMemoryTypeHost));
+        }
+        return false;
     }
 
     void validate_cuda_device_pointer_optional(const void* pointer,
