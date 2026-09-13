@@ -9,6 +9,9 @@
 
 #if defined(__x86_64__) || defined(_M_X64)
 #include <nmmintrin.h>
+#if defined(_MSC_VER)
+#include <intrin.h> // __cpuid
+#endif
 #endif
 
 namespace lfs::io::project {

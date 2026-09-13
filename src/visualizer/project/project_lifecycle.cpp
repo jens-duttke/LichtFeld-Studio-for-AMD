@@ -9165,9 +9165,14 @@ namespace lfs::vis::project {
         autosave_sequence_ = std::max(
             autosave_sequence_,
             candidate->autosave_sequence);
+        // Confirming the startup recovery prompt IS the authorization to drop
+        // what is currently open: at this point that is only the scratch
+        // project the app itself just created, which RequireClean nevertheless
+        // reports as dirty — leaving the user with a recovery offer that can
+        // never be accepted.
         enqueueRecoveryPrompt(
             std::move(*candidate),
-            ProjectSwitchDisposition::RequireClean,
+            ProjectSwitchDisposition::DiscardChanges,
             previous_autosave_sequence);
         gui->dismissStartupOverlay();
     }

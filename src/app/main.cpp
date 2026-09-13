@@ -85,20 +85,32 @@ namespace {
         // per_thread_stack × num_SMs × max_threads_per_SM = ~192 MiB on a 4090. Driver
         // accepts the request post-context but applies it on the *next* launch — well
         // before any real kernel runs.
-        cudaDeviceSetLimit(cudaLimitStackSize, 256);
+        // Not every CUDA implementation supports this limit. Ignoring the status
+        // would leave a sticky error behind that the next unrelated CUDA call
+        // reports as its own failure, so clear it explicitly.
+        if (cudaDeviceSetLimit(cudaLimitStackSize, 256) != cudaSuccess) {
+            (void)cudaGetLastError();
+        }
 
         // Phase 2: default cudaMallocAsync pool. Query its initial backing reservation.
         std::size_t pool_reserved = 0;
         int device = 0;
         if (cudaGetDevice(&device) == cudaSuccess) {
 #if CUDART_VERSION >= 12080
+            // Devices without stream-ordered pools have no default pool to
+            // report. Clear the status so this diagnostic cannot latch an error
+            // that a later, unrelated CUDA call would then report as its own.
             cudaMemPool_t pool = nullptr;
             if (cudaDeviceGetDefaultMemPool(&pool, device) == cudaSuccess) {
                 std::uint64_t reserved = 0;
                 if (cudaMemPoolGetAttribute(pool, cudaMemPoolAttrReservedMemCurrent, &reserved) ==
                     cudaSuccess) {
                     pool_reserved = static_cast<std::size_t>(reserved);
+                } else {
+                    (void)cudaGetLastError();
                 }
+            } else {
+                (void)cudaGetLastError();
             }
 #endif
         }
@@ -108,9 +120,13 @@ namespace {
         std::size_t printf_fifo = 0;
         std::size_t per_thread_stack = 0;
         std::size_t malloc_heap = 0;
-        cudaDeviceGetLimit(&printf_fifo, cudaLimitPrintfFifoSize);
-        cudaDeviceGetLimit(&per_thread_stack, cudaLimitStackSize);
-        cudaDeviceGetLimit(&malloc_heap, cudaLimitMallocHeapSize);
+        // Same reasoning as the set above: these are diagnostics, and an
+        // unsupported limit must not latch an error for later calls.
+        if (cudaDeviceGetLimit(&printf_fifo, cudaLimitPrintfFifoSize) != cudaSuccess ||
+            cudaDeviceGetLimit(&per_thread_stack, cudaLimitStackSize) != cudaSuccess ||
+            cudaDeviceGetLimit(&malloc_heap, cudaLimitMallocHeapSize) != cudaSuccess) {
+            (void)cudaGetLastError();
+        }
 
         // Stack is per-thread; total reservation = stack * max_threads_per_sm * num_sms.
         cudaDeviceProp prop{};

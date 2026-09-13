@@ -49,6 +49,9 @@ namespace lfs::core {
             (void)cudaMemPoolGetAttribute(
                 pool, cudaMemPoolAttrReservedMemCurrent, &pool_reserved);
         }
+        // Purely diagnostic: on devices without stream-ordered pools these
+        // queries fail, and a latched error would surface at an unrelated call.
+        (void)cudaGetLastError();
 #endif
 
         const std::string label_text = label.empty() ? "unnamed" : std::string(label);

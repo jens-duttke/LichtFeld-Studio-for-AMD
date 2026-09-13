@@ -2020,7 +2020,22 @@ namespace lfs::core {
         LFS_CUDA_BREADCRUMB("arena.grow");
         // Called with arena_mutex_ held (fallback for non-VMM systems)
         const size_t old_capacity = arena.capacity;
-        const size_t new_capacity = align_up(required_size, config_.alignment);
+        // Grow geometrically instead of to the exact request. Without VMM this
+        // path relocates the backing buffer, which invalidates pointers that
+        // callers assume stay contiguous across a frame's phases (FastGS builds
+        // its phase slices that way). Reallocating rarely keeps those runs
+        // intact and avoids a copy on every incremental request.
+        constexpr size_t MIN_GROWTH_STEP = 256ULL << 20;
+        size_t new_capacity = align_up(required_size, config_.alignment);
+        {
+            size_t target = old_capacity > MIN_GROWTH_STEP / 2 ? old_capacity * 2 : MIN_GROWTH_STEP;
+            if (target > config_.max_physical) {
+                target = config_.max_physical;
+            }
+            if (target > new_capacity) {
+                new_capacity = align_up(target, config_.alignment);
+            }
+        }
 
         if (new_capacity == 0 || new_capacity <= arena.capacity ||
             new_capacity > config_.max_physical) {
