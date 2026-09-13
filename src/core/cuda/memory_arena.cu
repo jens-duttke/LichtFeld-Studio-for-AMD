@@ -2028,7 +2028,25 @@ namespace lfs::core {
         constexpr size_t MIN_GROWTH_STEP = 256ULL << 20;
         size_t new_capacity = align_up(required_size, config_.alignment);
         {
-            size_t target = old_capacity > MIN_GROWTH_STEP / 2 ? old_capacity * 2 : MIN_GROWTH_STEP;
+            size_t target = 0;
+            if (old_capacity == 0) {
+                // The first block decides this arena's whole life: every later
+                // growth relocates it, and a relocation mid-frame breaks the
+                // contiguity FastGS's phase slices are built on. Take one block
+                // sized to what the device can spare instead of growing into a
+                // failure once a scene is large enough to need it.
+                size_t free_bytes = 0;
+                size_t total_bytes = 0;
+                if (cudaMemGetInfo(&free_bytes, &total_bytes) != cudaSuccess) {
+                    (void)cudaGetLastError();
+                    free_bytes = 0;
+                }
+                // Half of what is free: the model, its Vulkan mirror and the
+                // per-frame scratch all still have to fit beside the arena.
+                target = std::max(MIN_GROWTH_STEP, free_bytes / 2);
+            } else {
+                target = old_capacity > MIN_GROWTH_STEP / 2 ? old_capacity * 2 : MIN_GROWTH_STEP;
+            }
             if (target > config_.max_physical) {
                 target = config_.max_physical;
             }
