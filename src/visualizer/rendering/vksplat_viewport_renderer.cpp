@@ -5293,7 +5293,14 @@ namespace lfs::vis {
                 const bool any_mirrored =
                     std::any_of(model_storages.begin(), model_storages.end(),
                                 [](const auto* const s) { return *s && (*s)->isMirrored(); });
-                if (any_mirrored) {
+                // The copy only has to run when CUDA may have written since the
+                // last one. A changed snapshot or a forced upload covers model
+                // loads, densification, SH-degree flips and every viewer-side
+                // edit; training refreshes raise SPLATS on the trainer preview
+                // interval, so a live model still lands here. Camera-only frames
+                // do not, which is what makes mirrored binding usable at all:
+                // otherwise every orbit step re-copies the whole model.
+                if (any_mirrored && input_upload_requested) {
                     LOG_TIMER("prepareInputs.mirror_sync");
                     // The copy reads what CUDA has written, and the producing
                     // work may sit on any stream (model load, trainer, upload),
@@ -8540,12 +8547,27 @@ namespace lfs::vis {
             }
             buffers_.num_indices = instance_stats->raw_count;
             if (instance_stats->waves_needed > instance_stats->waves_armed) {
+                // This frame is lost, but the shortfall is measured: arm what it
+                // asked for so the next one through this view succeeds instead of
+                // failing again. The ceiling is what the timestamp query pool was
+                // sized for.
+                const std::uint32_t retry_waves = std::min<std::uint32_t>(
+                    static_cast<std::uint32_t>(instance_stats->waves_needed),
+                    HIGS_DEPTH_MAX_WAVES);
+                if (retry_waves > armed_depth_waves_) {
+                    armed_depth_waves_ = retry_waves;
+                    LOG_INFO("VkSplat depth waves raised to {} (frame needed {}, had {})",
+                             armed_depth_waves_,
+                             instance_stats->waves_needed,
+                             instance_stats->waves_armed);
+                }
                 return std::unexpected(std::format(
                     "VkSplat depth-wave budget exceeded: frame required {} waves of {} armed "
-                    "(K={} instances/wave)",
+                    "(K={} instances/wave); re-arming with {}",
                     instance_stats->waves_needed,
                     instance_stats->waves_armed,
-                    HIGS_DEPTH_WAVE_INSTANCES));
+                    HIGS_DEPTH_WAVE_INSTANCES,
+                    armed_depth_waves_));
             }
         }
         if (const auto lod_stats = renderer_.pollDeferredLodSelectionStats()) {
@@ -9431,9 +9453,11 @@ namespace lfs::vis {
                              HIGS_DEPTH_WAVE_INSTANCES,
                              id_count);
                 } else {
-                    armed_depth_waves = renderer_.supportsConditionalRendering()
-                                            ? HIGS_DEPTH_MAX_WAVES
-                                            : HIGS_DEPTH_MAX_WAVES_FALLBACK;
+                    armed_depth_waves =
+                        renderer_.supportsConditionalRendering()
+                            ? std::max<std::uint32_t>(armed_depth_waves_,
+                                                      HIGS_DEPTH_START_WAVES)
+                            : HIGS_DEPTH_MAX_WAVES_FALLBACK;
                 }
 
                 renderer_.executeWavePartition(

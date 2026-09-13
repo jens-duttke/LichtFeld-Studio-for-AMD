@@ -35,7 +35,15 @@
 // Fixed per-depth-wave tile-instance budget. Interactive recording arms the
 // capability-selected number of slots; exports record an exact upper bound.
 #define HIGS_DEPTH_WAVE_INSTANCES     4194304
-#define HIGS_DEPTH_MAX_WAVES          64
+// How many waves a frame needs follows the tile instances it produces, which
+// depends on the view as much as on the splat count: the same 9 M capture needs
+// 96 waves from one angle and 464 from another. Interactive recording therefore
+// arms START_WAVES and raises the count when a frame reports it came up short
+// (see VksplatViewportRenderer::armedDepthWaves); MAX_WAVES is only the ceiling
+// that sizes the timestamp query pool. An unused slot costs two queries and a
+// predicated dispatch record, nothing on the GPU.
+#define HIGS_DEPTH_START_WAVES        64
+#define HIGS_DEPTH_MAX_WAVES          2048
 #define HIGS_DEPTH_MAX_WAVES_FALLBACK 16
 
 // reordering for better memory colaescing

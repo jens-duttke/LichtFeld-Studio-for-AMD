@@ -680,6 +680,10 @@ namespace lfs::vis {
         // selection-overlay re-render reuses its sorted buffers and must match.
         bool last_render_used_macro_chain_ = false;
         std::size_t resident_depth_wave_armed_ = 0;
+        // Depth-wave slots armed for interactive frames beyond the starting
+        // budget. Zero until a frame reports it needed more; it only ever rises,
+        // so a view that once demanded them stays affordable to return to.
+        std::uint32_t armed_depth_waves_ = 0;
         int resident_sort_bits_ = 0;
         // The first frame after an input reset remains on the legacy chain;
         // it uses the same fixed-K wave machinery as every other legacy frame.
